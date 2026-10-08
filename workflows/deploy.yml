@@ -1,0 +1,101 @@
+name: Build, Test, and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies if package.json exists
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+          else
+            echo "No package.json found; skipping npm install."
+          fi
+
+      - name: Run build if available
+        run: |
+          if [ -f package.json ] && npm run | grep -q "build"; then
+            npm run build
+          else
+            echo "No build script found; skipping build."
+          fi
+
+      - name: Run test if available
+        run: |
+          if [ -f package.json ] && npm run | grep -q "test"; then
+            npm test
+          else
+            echo "No test script found; skipping tests."
+          fi
+
+  deploy:
+    needs: build-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+
+      - name: Notify pipeline-pro
+        if: always()
+        env:
+          PIPELINE_PRO_WEBHOOK_URL: ${{ secrets.PIPELINE_PRO_WEBHOOK_URL }}
+        run: |
+          if [ -n "$PIPELINE_PRO_WEBHOOK_URL" ]; then
+            curl -X POST "$PIPELINE_PRO_WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "repo":"'"${{ github.repository }}"'",
+                "branch":"main",
+                "commit":"'"${{ github.sha }}"'",
+                "event":"deployment",
+                "status":"success"
+              }'
+          else
+            echo "PIPELINE_PRO_WEBHOOK_URL not set; skipping pipeline notification."
+          fi
+
+      - name: Trigger hotel-task-cli tasks
+        if: always()
+        env:
+          HOTEL_TASK_CLI_URL: ${{ secrets.HOTEL_TASK_CLI_URL }}
+          HOTEL_TASK_CLI_API_KEY: ${{ secrets.HOTEL_TASK_CLI_API_KEY }}
+        run: |
+          if [ -n "$HOTEL_TASK_CLI_URL" ] && [ -n "$HOTEL_TASK_CLI_API_KEY" ]; then
+            curl -X POST "$HOTEL_TASK_CLI_URL/tasks" \
+              -H "Authorization: Bearer $HOTEL_TASK_CLI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "tasks":[
+                  {"name":"health_check","priority":1},
+                  {"name":"cache_clear","priority":2},
+                  {"name":"notify_team","priority":3}
+                ]
+              }'
+          else
+            echo "hotel-task-cli secrets not set; skipping task trigger."
+          fi
